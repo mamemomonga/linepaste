@@ -18,10 +18,7 @@ var (
 			Foreground(lipgloss.Color("15")).
 			Background(lipgloss.Color("62"))
 
-	upcomingStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("245"))
-
-	doneStyle = lipgloss.NewStyle().
+	normalStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("245"))
 
 	counterStyle = lipgloss.NewStyle().
@@ -39,7 +36,8 @@ var (
 type model struct {
 	lines      []string
 	cursor     int
-	copiedLine int // -1 = not copied yet
+	topLine    int
+	copiedLine int
 	copyErr    string
 	quitted    bool
 	width      int
@@ -47,7 +45,119 @@ type model struct {
 }
 
 func initialModel(lines []string) model {
-	return model{lines: lines, cursor: 0, copiedLine: -1}
+	return model{lines: lines, cursor: 0, topLine: 0, copiedLine: -1}
+}
+
+// maxContent returns the number of rows available for line content.
+func (m *model) maxContent() int {
+	// header 1 + blank 1 + help separator 1 + help 1 + margin 2 = 6
+	r := m.height - 6
+	if r < 5 {
+		r = 5
+	}
+	return r
+}
+
+// contentWidth returns the available width for line text.
+func (m *model) contentWidth() int {
+	w := m.width
+	if w <= 0 {
+		w = 80
+	}
+	gutterWidth := len(fmt.Sprintf("%d", len(m.lines)))
+	prefixWidth := 2 + gutterWidth + 1
+	cw := w - prefixWidth - 3
+	if cw < 20 {
+		cw = 20
+	}
+	return cw
+}
+
+// lineRows returns how many display rows a given line occupies.
+func (m *model) lineRows(i int) int {
+	line := m.lines[i]
+	if line == "" {
+		return 1
+	}
+	cw := m.contentWidth()
+	if i == m.cursor {
+		cw -= 2 // account for "▶ "
+	}
+	if cw <= 0 {
+		cw = 1
+	}
+	rows := (len(line) + cw - 1) / cw
+	if rows < 1 {
+		rows = 1
+	}
+	return rows
+}
+
+// visibleEnd calculates the last visible line index (exclusive) from a given start,
+// accounting for ellipsis lines.
+func (m *model) visibleEnd(from int, budget int) int {
+	hasAbove := from > 0
+	available := budget
+	if hasAbove {
+		available--
+	}
+
+	used := 0
+	end := from
+	for end < len(m.lines) {
+		rows := m.lineRows(end)
+		// Reserve 1 row for "··· below" if there will be more lines after this one
+		reserve := 0
+		if end+1 < len(m.lines) {
+			reserve = 1
+		}
+		if used+rows > available-reserve {
+			break
+		}
+		used += rows
+		end++
+	}
+
+	// If we reached the bottom, recalculate without the below reserve
+	if end == len(m.lines) {
+		used = 0
+		end = from
+		for end < len(m.lines) {
+			rows := m.lineRows(end)
+			if used+rows > available {
+				break
+			}
+			used += rows
+			end++
+		}
+	}
+	return end
+}
+
+// adjustViewport ensures cursor is visible, vim-style:
+// - Moving up: viewport scrolls only when cursor goes above the top
+// - Moving down: viewport scrolls only when cursor goes past the bottom
+func (m *model) adjustViewport() {
+	budget := m.maxContent()
+
+	// Cursor above viewport: snap topLine to cursor
+	if m.cursor < m.topLine {
+		m.topLine = m.cursor
+		return
+	}
+
+	// Cursor below viewport: scroll down minimally
+	for {
+		end := m.visibleEnd(m.topLine, budget)
+		if m.cursor < end {
+			break
+		}
+		m.topLine++
+		if m.topLine >= len(m.lines) {
+			m.topLine = len(m.lines) - 1
+			break
+		}
+	}
 }
 
 func (m *model) copyCurrentLine() {
@@ -111,6 +221,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.adjustViewport()
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -135,12 +246,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "g", "home":
 			m.cursor = 0
+			m.topLine = 0
 			m.copiedLine = -1
 
 		case "G", "end":
 			m.cursor = len(m.lines) - 1
 			m.copiedLine = -1
 		}
+		m.adjustViewport()
 	}
 	return m, nil
 }
@@ -187,28 +300,22 @@ func (m model) View() string {
 	}
 	b.WriteString("\n\n")
 
-	// Reserve rows: header 1 + blank 1 + help separator 1 + help 1 + margin 2 = 6
-	maxContentRows := m.height - 6
-	if maxContentRows < 5 {
-		maxContentRows = 5
-	}
+	budget := m.maxContent()
+	endIdx := m.visibleEnd(m.topLine, budget)
 
-	// Line number gutter width (based on total lines)
 	gutterWidth := len(fmt.Sprintf("%d", len(m.lines)))
-	// Layout: "▶ " or "  " (2 chars) + lineNum (gutterWidth) + " " + content
 	prefixWidth := 2 + gutterWidth + 1
-	contentWidth := w - prefixWidth - 3 // padding margin
-	if contentWidth < 20 {
-		contentWidth = 20
+	contentWidth := m.contentWidth()
+
+	ellipsisAbove := m.topLine > 0
+	ellipsisBelow := endIdx < len(m.lines)
+
+	if ellipsisAbove {
+		b.WriteString(normalStyle.Render(fmt.Sprintf("··· (%d lines above)", m.topLine)))
+		b.WriteString("\n")
 	}
 
-	// Pre-render all lines and count their display rows
-	type renderedLine struct {
-		text string
-		rows int
-	}
-
-	renderLine := func(i int) renderedLine {
+	for i := m.topLine; i < endIdx; i++ {
 		line := m.lines[i]
 		if line == "" {
 			line = "⏎"
@@ -216,113 +323,33 @@ func (m model) View() string {
 		lineNum := fmt.Sprintf("%*d ", gutterWidth, i+1)
 		indent := strings.Repeat(" ", prefixWidth)
 
-		var sb strings.Builder
 		if i == m.cursor {
 			marker := "▶ " + lineNum
-			wrapped := wrapText(line, contentWidth)
-			parts := strings.Split(wrapped, "\n")
-			for li, l := range parts {
+			wrapped := wrapText(line, contentWidth-2)
+			for li, l := range strings.Split(wrapped, "\n") {
 				if li == 0 {
-					sb.WriteString(currentStyle.Render(marker + l))
+					b.WriteString(currentStyle.Render(marker + l))
 				} else {
-					sb.WriteString(currentStyle.Render(indent + l))
+					b.WriteString(currentStyle.Render(indent + l))
 				}
-				sb.WriteString("\n")
+				b.WriteString("\n")
 			}
-			return renderedLine{sb.String(), len(parts)}
-		}
-		marker := "  " + lineNum
-		style := upcomingStyle
-		if i < m.cursor {
-			style = doneStyle
-		}
-		wrapped := wrapText(line, contentWidth)
-		parts := strings.Split(wrapped, "\n")
-		for li, l := range parts {
-			if li == 0 {
-				sb.WriteString(style.Render(marker + l))
-			} else {
-				sb.WriteString(style.Render(indent + l))
+		} else {
+			marker := "  " + lineNum
+			wrapped := wrapText(line, contentWidth)
+			for li, l := range strings.Split(wrapped, "\n") {
+				if li == 0 {
+					b.WriteString(normalStyle.Render(marker + l))
+				} else {
+					b.WriteString(normalStyle.Render(indent + l))
+				}
+				b.WriteString("\n")
 			}
-			sb.WriteString("\n")
 		}
-		return renderedLine{sb.String(), len(parts)}
-	}
-
-	// Build visible lines: start from cursor, expand outward
-	// Always include the current line first
-	curRendered := renderLine(m.cursor)
-	usedRows := curRendered.rows
-
-	// Expand before cursor
-	startIdx := m.cursor
-	for s := m.cursor - 1; s >= 0; s-- {
-		r := renderLine(s)
-		if usedRows+r.rows > maxContentRows {
-			break
-		}
-		usedRows += r.rows
-		startIdx = s
-	}
-
-	// Expand after cursor
-	endIdx := m.cursor + 1
-	for e := m.cursor + 1; e < len(m.lines); e++ {
-		r := renderLine(e)
-		if usedRows+r.rows > maxContentRows {
-			break
-		}
-		usedRows += r.rows
-		endIdx = e + 1
-	}
-
-	// Trim back to make room for "···" indicator lines
-	ellipsisAbove := startIdx > 0
-	ellipsisBelow := endIdx < len(m.lines)
-	needed := 0
-	if ellipsisAbove {
-		needed++
-	}
-	if ellipsisBelow {
-		needed++
-	}
-	// Remove lines from the edges until we have room for ellipsis
-	for usedRows+needed > maxContentRows && endIdx > m.cursor+1 {
-		endIdx--
-		usedRows -= renderLine(endIdx).rows
-		if endIdx < len(m.lines) {
-			ellipsisBelow = true
-		}
-	}
-	for usedRows+needed > maxContentRows && startIdx < m.cursor {
-		usedRows -= renderLine(startIdx).rows
-		startIdx++
-		if startIdx > 0 {
-			ellipsisAbove = true
-		}
-	}
-	// Recalculate needed after trimming
-	needed = 0
-	if ellipsisAbove {
-		needed++
-	}
-	if ellipsisBelow {
-		needed++
-	}
-
-	// Render
-	if ellipsisAbove {
-		b.WriteString(upcomingStyle.Render(fmt.Sprintf("··· (%d lines above)", startIdx)))
-		b.WriteString("\n")
-	}
-
-	for i := startIdx; i < endIdx; i++ {
-		r := renderLine(i)
-		b.WriteString(r.text)
 	}
 
 	if ellipsisBelow {
-		b.WriteString(upcomingStyle.Render(fmt.Sprintf("··· (%d lines below)", len(m.lines)-endIdx)))
+		b.WriteString(normalStyle.Render(fmt.Sprintf("··· (%d lines below)", len(m.lines)-endIdx)))
 		b.WriteString("\n")
 	}
 
@@ -335,12 +362,10 @@ func (m model) View() string {
 }
 
 func main() {
-	// Read lines from stdin or file
 	var scanner *bufio.Scanner
 
 	stat, _ := os.Stdin.Stat()
 	if (stat.Mode() & os.ModeCharDevice) == 0 {
-		// Piped input
 		scanner = bufio.NewScanner(os.Stdin)
 	} else if len(os.Args) > 1 {
 		f, err := os.Open(os.Args[1])
@@ -365,7 +390,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Re-open /dev/tty for bubbletea input
 	tty, err := os.Open("/dev/tty")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Cannot open /dev/tty: %v\n", err)
