@@ -27,6 +27,25 @@ cat file | go run .
 
 テストは存在しない。
 
+## リリース
+
+`v` から始まるタグをプッシュすると GitHub Actions が自動でビルド・リリースを行う。
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+`.github/workflows/release.yml` が以下の3プラットフォームでビルドし、GitHub Release にバイナリを添付する:
+
+| ラベル | ランナー |
+|---|---|
+| `macos-arm64` | `macos-latest` |
+| `macos-x64` | `macos-13` |
+| `linux-x64` | `ubuntu-latest` |
+
+成果物のバイナリ名は `linepaste-<label>` 形式（例: `linepaste-macos-arm64`）。
+
 ## アーキテクチャ
 
 コード全体が `main.go` 1ファイルに収まるシンプルな構造。
