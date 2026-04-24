@@ -12,8 +12,9 @@ jobs:
         include:
           - os: macos-latest
             label: macos-arm64
-          - os: macos-13
+          - os: macos-14
             label: macos-x64
+            goarch: amd64
           - os: ubuntu-latest
             label: linux-x64
     runs-on: ${{ matrix.os }}
@@ -28,6 +29,8 @@ jobs:
 
       - name: Build
         run: make build
+        env:
+          GOARCH: ${{ matrix.goarch }}
 
       - name: Rename binary
         run: mv linepaste linepaste-${{ matrix.label }}

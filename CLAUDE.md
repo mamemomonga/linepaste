@@ -41,7 +41,7 @@ git push origin v1.0.0
 | ラベル | ランナー |
 |---|---|
 | `macos-arm64` | `macos-latest` |
-| `macos-x64` | `macos-13` |
+| `macos-x64` | `macos-14`（`GOARCH=amd64` でクロスコンパイル） |
 | `linux-x64` | `ubuntu-latest` |
 
 成果物のバイナリ名は `linepaste-<label>` 形式（例: `linepaste-macos-arm64`）。
