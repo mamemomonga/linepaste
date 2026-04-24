@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
 var (
@@ -66,9 +67,9 @@ func (m *model) contentWidth() int {
 	}
 	gutterWidth := len(fmt.Sprintf("%d", len(m.lines)))
 	prefixWidth := 2 + gutterWidth + 1
-	cw := w - prefixWidth - 3
-	if cw < 20 {
-		cw = 20
+	cw := w - prefixWidth
+	if cw < 1 {
+		cw = 1
 	}
 	return cw
 }
@@ -80,13 +81,10 @@ func (m *model) lineRows(i int) int {
 		return 1
 	}
 	cw := m.contentWidth()
-	if i == m.cursor {
-		cw -= 2 // account for "▶ "
-	}
 	if cw <= 0 {
 		cw = 1
 	}
-	rows := (len(line) + cw - 1) / cw
+	rows := (runewidth.StringWidth(line) + cw - 1) / cw
 	if rows < 1 {
 		rows = 1
 	}
@@ -258,23 +256,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func wrapText(s string, width int) string {
-	if width <= 0 || len(s) <= width {
-		return s
+// wrapText splits s into lines whose display width does not exceed width.
+// Width is measured with runewidth so that CJK/double-width characters are
+// handled correctly and multi-byte runes are never split mid-character.
+func wrapText(s string, width int) []string {
+	if width <= 0 {
+		return []string{s}
 	}
-	var b strings.Builder
-	for len(s) > 0 {
-		if b.Len() > 0 {
-			b.WriteByte('\n')
-		}
-		end := width
-		if end > len(s) {
-			end = len(s)
-		}
-		b.WriteString(s[:end])
-		s = s[end:]
+	if runewidth.StringWidth(s) <= width {
+		return []string{s}
 	}
-	return b.String()
+	var lines []string
+	var cur strings.Builder
+	curW := 0
+	for _, r := range s {
+		rw := runewidth.RuneWidth(r)
+		if rw == 0 {
+			cur.WriteRune(r)
+			continue
+		}
+		if curW+rw > width {
+			lines = append(lines, cur.String())
+			cur.Reset()
+			curW = 0
+		}
+		cur.WriteRune(r)
+		curW += rw
+	}
+	if cur.Len() > 0 || len(lines) == 0 {
+		lines = append(lines, cur.String())
+	}
+	return lines
 }
 
 func (m model) View() string {
@@ -317,34 +329,24 @@ func (m model) View() string {
 
 	for i := m.topLine; i < endIdx; i++ {
 		line := m.lines[i]
-		if line == "" {
-			line = "⏎"
-		}
 		lineNum := fmt.Sprintf("%*d ", gutterWidth, i+1)
 		indent := strings.Repeat(" ", prefixWidth)
 
+		style := normalStyle
+		marker := "  " + lineNum
 		if i == m.cursor {
-			marker := "▶ " + lineNum
-			wrapped := wrapText(line, contentWidth-2)
-			for li, l := range strings.Split(wrapped, "\n") {
-				if li == 0 {
-					b.WriteString(currentStyle.Render(marker + l))
-				} else {
-					b.WriteString(currentStyle.Render(indent + l))
-				}
-				b.WriteString("\n")
+			style = currentStyle
+			marker = "▶ " + lineNum
+		}
+
+		wrapped := wrapText(line, contentWidth)
+		for li, l := range wrapped {
+			if li == 0 {
+				b.WriteString(style.Render(marker + l))
+			} else {
+				b.WriteString(style.Render(indent + l))
 			}
-		} else {
-			marker := "  " + lineNum
-			wrapped := wrapText(line, contentWidth)
-			for li, l := range strings.Split(wrapped, "\n") {
-				if li == 0 {
-					b.WriteString(normalStyle.Render(marker + l))
-				} else {
-					b.WriteString(normalStyle.Render(indent + l))
-				}
-				b.WriteString("\n")
-			}
+			b.WriteString("\n")
 		}
 	}
 
